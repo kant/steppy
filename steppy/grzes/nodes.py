@@ -62,7 +62,12 @@ class TransformerNode(Node):
     def __setstate__(self, state):
         for k, v in state.items():
             setattr(self, k, v)
-        self._transformer = self._tr_type(self._tr_init_kwargs)
+        self._transformer = self._tr_type(**self._tr_init_kwargs)
+
+    def reset_transformer(self, timestamp: Timestamp):
+        self._transformer = self._tr_type(**self._tr_init_kwargs)
+        self._fitted = False
+        self._timestamp = timestamp
 
     def get_version_differences(self, other_node: 'TransformerNode'):
         diffs = []
@@ -74,7 +79,7 @@ class TransformerNode(Node):
             diffs.append("Initializer argument differences: {}".format(', '.join(kwargs_diffs)))
         return diffs
 
-    def _is_fitted(self):
+    def is_fitted(self):
         return self._fitted
 
     def fit(self, dependency_timestamps, fit_args: Dict[str, Any]) -> None:
@@ -131,20 +136,32 @@ class SelectorNode(Node):
                 self._evaluator.__class__, other_node._evaluator.__class__))
         return diffs
 
+    def evaluate(self, input_results: Dict[str, Any]) -> float:
+        return self._evaluator.evaluate(input_results)
+
+    def good_value(self) -> Evaluator.GoodValue:
+        return self._evaluator.good_value()
+
+    def is_high_value_good(self) -> bool:
+        return self._evaluator.good_value() == Evaluator.GoodValue.HIGH
+
+    def is_low_value_good(self) -> bool:
+        return self._evaluator.good_value() == Evaluator.GoodValue.LOW
+
 
 def get_dict_differences(curr: dict, new: dict):
     diffs = []
     for key, val in curr.items():
         if key not in new:
-            diffs.append("key {} present in current but not in new")
+            diffs.append("key '{}' present in current but not in new")
         else:
             new_val = new[key]
             if val != new_val:
-                diffs.append("key {} mapped to {} in current, and to {} in new"
+                diffs.append("key '{}' mapped to '{}' in current, and to '{}' in new"
                              .format(key, val, new_val))
 
     for key in new:
         if key not in curr:
-            diffs.append("key {} present in new but not in current")
+            diffs.append("key '{}' present in new but not in current")
 
     return diffs
