@@ -6,7 +6,7 @@ E = NamedTuple('E', [('input_name', str),
 
 AdaptingRecipe = Any
 Results = Dict[str, Any]
-AllInputs = Dict[str, Any]
+AllInputs = Dict[str, Results]
 
 
 class AdapterError(Exception):
