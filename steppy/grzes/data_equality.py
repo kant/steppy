@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 
 def data_equals(s, t):
     if s.__class__ != t.__class__:
@@ -13,6 +14,8 @@ def data_equals(s, t):
         return list_equals(sorted(list(s)), sorted(list(t)))
     if isinstance(s, np.ndarray):
         return np.array_equal(s, t)
+    if isinstance(s, pd.DataFrame):
+        return s.equals(t)
 
     return s == t
 

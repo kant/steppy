@@ -19,6 +19,9 @@ class Node:
     def get_version_differences(self, other_node: 'Node') -> List:
         return []
 
+    def set_dependency_timestamps(self, dependency_timestamps: Dict[str, Timestamp]):
+        self._dependency_timestamps = dependency_timestamps
+
     def get_timestamp(self) -> Timestamp:
         return self._timestamp
 
@@ -153,7 +156,7 @@ def get_dict_differences(curr: dict, new: dict):
     diffs = []
     for key, val in curr.items():
         if key not in new:
-            diffs.append("key '{}' present in current but not in new")
+            diffs.append("key '{}' present in current but not in new".format(key))
         else:
             new_val = new[key]
             if val != new_val:
@@ -162,6 +165,6 @@ def get_dict_differences(curr: dict, new: dict):
 
     for key in new:
         if key not in curr:
-            diffs.append("key '{}' present in new but not in current")
+            diffs.append("key '{}' present in new but not in current".format(key))
 
     return diffs

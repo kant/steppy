@@ -272,7 +272,8 @@ class Pipeline:
                                        input_names=input_names,
                                        tr_names=tr_names)
         self._copy_transformer(best_tr_name, selected_name)
-        self._load_node(selected_name, NodeType.TRANSFORMER)
+        copied_node = self._reload_node(selected_name, NodeType.TRANSFORMER)
+        copied_node.set_dependency_timestamps(dependency_timestamps)
 
     def _do_select(self, selector_name: str,
                    selected_name: str,
@@ -285,6 +286,7 @@ class Pipeline:
         for i, name in enumerate(input_names):
             data_node = self.data_nodes[name]
             val = sel_node.evaluate(data_node.get_content())
+            logger.info("Transformer '{}' scored {}".format(tr_names[i], val))
             if (sel_node.is_high_value_good() and val > best_value) or\
                     (sel_node.is_low_value_good() and val < best_value):
                 best_value = val
@@ -303,8 +305,10 @@ class Pipeline:
 
     def _load_node(self, name: str, node_type: NodeType):
         if self._is_node_loaded(name):
-            raise RuntimeError("Trying to load an already loaded node.")
+            raise RuntimeError("Trying to load an already loaded node: '{}'.".format(name))
+        return self._reload_node(name, node_type)
 
+    def _reload_node(self, name: str, node_type: NodeType):
         return {
             NodeType.DATA: self._load_data_node,
             NodeType.TRANSFORMER: self._load_transformer_node,

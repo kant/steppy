@@ -1,4 +1,5 @@
 import numpy as np
+import joblib
 
 from steppy.base import BaseTransformer
 
@@ -28,9 +29,29 @@ class ConstantTransformer(BaseTransformer):
         super().__init__()
         self.c = c
         self.id = np.random.randint(10**12)
+        self.fitted = False
+
+    def fit(self, **kwargs):
+        self.fitted = True
 
     def transform(self, *args, **kwargs):
+        if not self.fitted:
+            raise RuntimeError("Call fit first.")
+
         return {'value': self.c, 'id': self.id}
+
+    def save(self, path):
+        joblib.dump({
+            'c': self.c,
+            'id': self.id,
+            'fitted': self.fitted
+        }, path)
+
+    def load(self, path):
+        state = joblib.load(path)
+        self.c = state['c']
+        self.id = state['id']
+        self.fitted = state['fitted']
 
 
 class DummyEvaluator(Evaluator):
@@ -99,7 +120,8 @@ def selector_pipeline():
     for c in lst:
         tr_name = 'const_{}'.format(c)
         out_name = 'output_{}'.format(c)
-        p.put(TransformerDesc(tr_name, ConstantTransformer, dict(c=c)))
+        p.fit(input_names=[],
+              transformer=TransformerDesc(tr_name, ConstantTransformer, dict(c=c)))
         p.transform(input_names=['train'],
                     tr_name=tr_name,
                     output_name=out_name)
