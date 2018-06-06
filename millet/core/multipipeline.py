@@ -169,8 +169,8 @@ class MultiPipeline(object):
             if 'source_data_keys' in edge_data:
                 for new_data_key, src_data_key in edge_data['source_data_keys'].items():
                     src_output = self.get_step_output(src_node_name)
-                    new_dict[new_data_key] = src_output[src_data_key]
                     print(f'[MultiPipeline]     Forwarding data {src_node_name}:{src_data_key} to data {node_name}:{new_data_key}')
+                    new_dict[new_data_key] = src_output[src_data_key]
         return new_dict
 
     def _translate_superv(self, node_name):
