@@ -2,16 +2,16 @@ from collections import defaultdict
 from time import time
 from pathlib import Path
 import joblib
-from typing import NamedTuple, Type, Dict, List, Union, Any, cast
+from typing import NamedTuple, Type, Dict, List, Union, Any
 from enum import Enum
-import shutil
 import traceback
 
 from steppy.base import StepsError
 from steppy.utils import get_logger
 from steppy.adapter import Adapter, AdapterError, AllInputs
 
-from steppy.grzes.nodes import Node, DataNode, TransformerNode, SelectorNode, Evaluator, Timestamp
+from steppy.grzes.nodes import Node, DataNode, TransformerNode, SelectorNode, Evaluator,\
+    Timestamp, DataPacket
 from steppy.grzes.data_equality import data_equals
 
 logger = get_logger()
@@ -54,7 +54,8 @@ class Pipeline:
                 traceback.print_exc()
                 raise StepsError(msg) from e
 
-        return {name: node.get_content() for name, node in self.data_nodes.items()}
+    def get_data(self, data_node_name: str) -> DataPacket:
+        return self.data_nodes[data_node_name].get_content()
 
     def put(self, node_desc: TransformerDesc):
         self.agenda.append((self._create_transformer,
@@ -112,8 +113,8 @@ class Pipeline:
         for name, content in input_data.items():
             if not from_scratch:
                 try:
-                    self._load_node(name, NodeType.DATA)
-                    if data_equals(self.data_nodes[name].get_content(), content):
+                    node = self._load_node(name, NodeType.DATA)
+                    if data_equals(node.get_content(), content):
                         logger.info("Input node '{}' up-to-date.".format(name))
                         continue
                     else:
@@ -121,9 +122,13 @@ class Pipeline:
                 except FileNotFoundError:
                     logger.info("Input node '{}' not found on disk.".format(name))
 
-            logger.info("Creating a new input node '{}'".format(name))
-            self.data_nodes[name] = DataNode(content=content,
-                                             timestamp=timestamp)
+            logger.info("Creating a new data node '{}'.".format(name))
+            self.data_nodes[name] = DataNode(data_path=self._get_data_path(name))
+            self.data_nodes[name].set_content(
+                    content=content,
+                    timestamp=timestamp,
+                    dependency_timestamps={}
+            )
             self._save_node(name)
 
     def _create_transformer(self, tr_desc: TransformerDesc) -> None:
@@ -133,7 +138,7 @@ class Pipeline:
 
         new_node = TransformerNode(tr_type=tr_desc.type,
                                    tr_init_kwargs=tr_desc.init_kwargs,
-                                   timestamp=self._make_timestamp())
+                                   tr_path=self._get_transformer_path(tr_desc.name))
         try:
             loaded_node = self._load_node(tr_desc.name, NodeType.TRANSFORMER)
             ver_diffs = loaded_node.get_version_differences(new_node)
@@ -146,7 +151,7 @@ class Pipeline:
         except FileNotFoundError:
             logger.info("No saved transformer '{}' found.".format(tr_desc.name))
 
-        logger.info("Creating a new transformer.")
+        logger.info("Creating a new transformer node {}.".format(tr_desc.name))
         self.transformer_nodes[tr_desc.name] = new_node
         self._save_node(tr_desc.name)
 
@@ -168,7 +173,6 @@ class Pipeline:
             else:
                 logger.info("Transformer '{}' out-of-date because of dependency changes: {}"
                             .format(tr_name, '; '.join(dep_diffs)))
-                tr_node.reset_transformer(self._make_timestamp())
 
         logger.info("Fitting transformer '{}'.".format(tr_name))
         self._do_fit(tr_name, input_names, adapter)
@@ -183,7 +187,11 @@ class Pipeline:
             fit_args = self._unpack(inputs_contents)
 
         logger.info("Fitting '{}'.".format(tr_name))
-        self.transformer_nodes[tr_name].fit(input_timestamps, fit_args)
+        self.transformer_nodes[tr_name].fit(
+            dependency_timestamps=input_timestamps,
+            timestamp=self._make_timestamp(),
+            fit_args=fit_args
+        )
 
     def _scheduled_transform(self, input_names, tr_name, output_name, adapter=None) -> None:
         self._raise_if_inputs_dont_exist(input_names)
@@ -205,19 +213,21 @@ class Pipeline:
                 logger.info("Data '{}' did not exist.".format(output_name))
 
         logger.info("Transformer '{}' is creating data '{}'.".format(tr_name, output_name))
-        new_node = self._do_transform(tr_name, input_names, adapter)
-        self.data_nodes[output_name] = new_node
+        self.data_nodes[output_name] = DataNode(data_path=self._get_data_path(output_name))
+        self.data_nodes[output_name].set_content(
+            content=self._do_transform(tr_name, input_names, adapter),
+            timestamp=self._make_timestamp(),
+            dependency_timestamps=dependency_timestamps
+        )
         self._save_node(output_name)
 
     def _do_transform(self, tr_name: str, input_names: List[str], adapter: Adapter) -> DataNode:
         inputs_contents = {name: self.data_nodes[name].get_content() for name in input_names}
-        dependency_timestamps = self._get_timestamps([tr_name] + input_names)
         if adapter:
             tr_args = self._adapt(adapter, inputs_contents)
         else:
             tr_args = self._unpack(inputs_contents)
-        return self.transformer_nodes[tr_name].transform(tr_name, dependency_timestamps,
-                                                         self._make_timestamp(), tr_args)
+        return self.transformer_nodes[tr_name].transform(tr_args)
 
     def _create_selector(self, sel_desc: SelectorDesc) -> None:
         if self._is_node_loaded(sel_desc.name):
@@ -238,7 +248,7 @@ class Pipeline:
         except FileNotFoundError:
             logger.info("No saved selector '{}' found.".format(sel_desc.name))
 
-        logger.info("Creating a new selector.")
+        logger.info("Creating a new selector '{}'.".format(sel_desc.name))
         self.selector_nodes[sel_desc.name] = new_node
         self._save_node(sel_desc.name)
 
@@ -266,38 +276,41 @@ class Pipeline:
         except FileNotFoundError:
                 logger.info("Transformer '{}' not found on disk.".format(selected_name))
 
-        logger.info("Selector '{}' is selecting transformer '{}'.".format(selector_name, selected_name))
+        logger.info("Selector '{}' is selecting transformer '{}'."
+                    .format(selector_name, selected_name))
         best_tr_name = self._do_select(selector_name=selector_name,
-                                       selected_name=selected_name,
                                        input_names=input_names,
                                        tr_names=tr_names)
-        self._copy_transformer(best_tr_name, selected_name)
-        copied_node = self._reload_node(selected_name, NodeType.TRANSFORMER)
-        copied_node.set_dependency_timestamps(dependency_timestamps)
+        copied_node = self.transformer_nodes[best_tr_name].copy(
+            copied_tr_path=self._get_transformer_path(selected_name),
+            dependency_timestamps=dependency_timestamps,
+            timestamp=self._make_timestamp())
+        self.transformer_nodes[selected_name] = copied_node
+        self._save_node(selected_name)
 
     def _do_select(self, selector_name: str,
-                   selected_name: str,
                    input_names: List[str],
                    tr_names: List[str]
                    ) -> str:
         sel_node = self.selector_nodes[selector_name]
-        best_value = float("-inf") if sel_node.is_high_value_good() else float("inf")
-        best_index = -1
-        for i, name in enumerate(input_names):
-            data_node = self.data_nodes[name]
-            val = sel_node.evaluate(data_node.get_content())
-            logger.info("Transformer '{}' scored {}".format(tr_names[i], val))
-            if (sel_node.is_high_value_good() and val > best_value) or\
-                    (sel_node.is_low_value_good() and val < best_value):
-                best_value = val
-                best_index = i
-        return tr_names[best_index]
+        input_results = {name: self.data_nodes[name].get_content() for name in input_names}
+        best_input_name, tr_scores = sel_node.select(input_results)
+        best_tr_name = tr_names[input_names.index(best_input_name)]
+
+        for name, score in tr_scores.items():
+            logger.info("Transformer '{}' scored {}".format(name, score))
+        logger.info("Selector '{}' selected transformer '{}'".format(selector_name, best_tr_name))
+
+        return best_tr_name
 
     def _get_node_path(self, node_name: str) -> Path:
         return Path(self.working_dir) / 'nodes' / '{}.pkl'.format(node_name)
 
     def _get_transformer_path(self, tr_name: str) -> Path:
         return Path(self.working_dir) / 'transformers' / '{}.sav'.format(tr_name)
+
+    def _get_data_path(self, node_name: str) -> Path:
+        return Path(self.working_dir) / 'data' / '{}.pkl'.format(node_name)
 
     def _is_node_saved(self, node_name: str) -> bool:
         path_node = self._get_node_path(node_name)
@@ -309,30 +322,9 @@ class Pipeline:
         return self._reload_node(name, node_type)
 
     def _reload_node(self, name: str, node_type: NodeType):
-        return {
-            NodeType.DATA: self._load_data_node,
-            NodeType.TRANSFORMER: self._load_transformer_node,
-            NodeType.SELECTOR: self._load_selector_node,
-        }.get(node_type)(name)
-
-    def _load_data_node(self, name: str):
         path_node = self._get_node_path(name)
         node = joblib.load(str(path_node))
-        self.data_nodes[name] = node
-        return node
-
-    def _load_transformer_node(self, name):
-        path_node = self._get_node_path(name)
-        path_tran = self._get_transformer_path(name)
-        node = joblib.load(str(path_node))
-        node.load_transformer(path_tran)
-        self.transformer_nodes[name] = node
-        return node
-
-    def _load_selector_node(self, name):
-        path_node = self._get_node_path(name)
-        node = joblib.load(str(path_node))
-        self.selector_nodes[name] = node
+        self.node_dicts[node_type][name] = node
         return node
 
     def _save_node(self, node_name: str):
@@ -340,11 +332,6 @@ class Pipeline:
         node = self._get_node(node_name)
         path = self._get_node_path(node_name)
         path.parent.mkdir(parents=True, exist_ok=True)
-        if node_name in self.transformer_nodes:
-            node = cast(TransformerNode, node)
-            path_tran = self._get_transformer_path(node_name)
-            path_tran.parent.mkdir(parents=True, exist_ok=True)
-            node.save_transformer(str(path_tran))
         joblib.dump(node, str(path))
 
     def _get_node(self, node_name: str) -> Node:
@@ -399,11 +386,3 @@ class Pipeline:
 
     def _make_timestamp(self) -> Timestamp:
         return time()
-
-    def _copy_transformer(self, source_name: str, destination_name: str):
-        source_node_path = self._get_node_path(source_name)
-        source_tran_path = self._get_transformer_path(source_name)
-        destination_node_path = self._get_node_path(destination_name)
-        destination_tran_path = self._get_transformer_path(destination_name)
-        shutil.copy(str(source_node_path), str(destination_node_path))
-        shutil.copy(str(source_tran_path), str(destination_tran_path))

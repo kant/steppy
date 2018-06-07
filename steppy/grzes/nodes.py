@@ -1,16 +1,20 @@
 from enum import Enum
-from typing import Dict, Any, Type, List
+from typing import Dict, Any, Type, List, Union, cast, Tuple
+from pathlib import Path
+import joblib
+import shutil
 
-from steppy.base import StepsError, BaseTransformer
+from steppy.base import BaseTransformer
 
 Timestamp = float
+DataPacket = Dict[str, Any]
 
 
 class Node:
     def __init__(self, *,
                  dependency_timestamps: Dict[str, Timestamp]=None,
-                 timestamp: Timestamp=None):
-        self._dependency_timestamps = dependency_timestamps
+                 timestamp: Timestamp=0):
+        self._dependency_timestamps = dependency_timestamps or {}
         self._timestamp = timestamp
 
     def get_dependency_differences(self, new_dependency_timestamps: Dict[str, Timestamp]) -> List:
@@ -25,52 +29,49 @@ class Node:
     def get_timestamp(self) -> Timestamp:
         return self._timestamp
 
+    def set_timestamp(self, timestamp: Timestamp):
+        self._timestamp = timestamp
+
 
 class DataNode(Node):
     def __init__(self, *,
-                 content: Any=None,
-                 transformer_name: str=None,
+                 data_path: Union[str, Path],
                  dependency_timestamps: Dict[str, Timestamp]=None,
-                 timestamp: Timestamp=None):
-        super().__init__(dependency_timestamps=dependency_timestamps,
-                         timestamp=timestamp)
-        self._content = content
-        self._transformer_name = transformer_name,
+                 timestamp: Timestamp=0):
+        super().__init__(dependency_timestamps=dependency_timestamps, timestamp=timestamp)
+        self._data_path = Path(data_path)
+
+    def set_content(self, *,
+                    content: Any,
+                    timestamp: Timestamp,
+                    dependency_timestamps: Dict[str, Timestamp]):
+        self.set_timestamp(timestamp)
+        self.set_dependency_timestamps(dependency_timestamps)
+        self._data_path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(content, str(self._data_path))
 
     def get_content(self) -> Any:
-        return self._content
-
-    def get_source_transformer(self):
-        return self._transformer_name
+        return joblib.load(str(self._data_path))
 
 
 class TransformerNode(Node):
     def __init__(self, *,
                  tr_type: Type[BaseTransformer],
                  tr_init_kwargs: Dict[str, Any],
+                 tr_path: Union[str, Path],
                  dependency_timestamps: Dict[str, Timestamp]=None,
-                 timestamp: Timestamp=None):
-        super().__init__(dependency_timestamps=dependency_timestamps,
-                         timestamp=timestamp)
+                 timestamp: Timestamp=0
+                 ):
+        super().__init__(dependency_timestamps=dependency_timestamps, timestamp=timestamp)
         self._tr_type = tr_type
         self._tr_init_kwargs = tr_init_kwargs
-        self._transformer = tr_type(**tr_init_kwargs)
+        self._tr_path = Path(tr_path)
         self._fitted = False
 
-    def __getstate__(self):
-        state = dict(self.__dict__)
-        del state['_transformer']
-        return state
-
-    def __setstate__(self, state):
-        for k, v in state.items():
-            setattr(self, k, v)
-        self._transformer = self._tr_type(**self._tr_init_kwargs)
-
-    def reset_transformer(self, timestamp: Timestamp):
-        self._transformer = self._tr_type(**self._tr_init_kwargs)
-        self._fitted = False
-        self._timestamp = timestamp
+    # def reset_transformer(self, timestamp: Timestamp):
+    #     self._transformer = self._tr_type(**self._tr_init_kwargs)
+    #     self._fitted = False
+    #     self._timestamp = timestamp
 
     def get_version_differences(self, other_node: 'TransformerNode'):
         diffs = []
@@ -85,30 +86,36 @@ class TransformerNode(Node):
     def is_fitted(self):
         return self._fitted
 
-    def fit(self, dependency_timestamps, fit_args: Dict[str, Any]) -> None:
-        if self._fitted:
-            msg = "Fitting a node for a second time."
-            raise StepsError(msg)
-        self._transformer.fit(**fit_args)
-        self._dependency_timestamps = dependency_timestamps
+    def fit(self, *,
+            dependency_timestamps,
+            timestamp: Timestamp=None,
+            fit_args: Dict[str, Any]
+            ) -> None:
+        self.set_timestamp(timestamp)
+        self.set_dependency_timestamps(dependency_timestamps)
+        transformer = self._tr_type(**self._tr_init_kwargs)
+        transformer.fit(**fit_args)
         self._fitted = True
+        self._tr_path.parent.mkdir(parents=True, exist_ok=True)
+        transformer.save(self._tr_path)
 
-    def transform(self,
-                  tr_name: str,
-                  dependency_timestamps: Dict[str, Timestamp],
-                  timestamp: Timestamp,
-                  tr_args: Dict[str, Any]) -> DataNode:
-        result = self._transformer.transform(**tr_args)
-        return DataNode(content=result,
-                        transformer_name=tr_name,
-                        dependency_timestamps=dependency_timestamps,
-                        timestamp=timestamp)
+    def transform(self, tr_args: Dict[str, Any]) -> DataPacket:
+        transformer = self._tr_type(**self._tr_init_kwargs)
+        if self._tr_path.exists():
+            transformer.load(self._tr_path)
+        result = transformer.transform(**tr_args)
+        return cast(DataPacket, result)
 
-    def save_transformer(self, path):
-        self._transformer.save(path)
-
-    def load_transformer(self, path):
-        self._transformer.load(path)
+    def copy(self, *,
+             copied_tr_path: Union[str, Path],
+             dependency_timestamps: Dict[str, Timestamp]=None,
+             timestamp: Timestamp=0):
+        shutil.copy(str(self._tr_path), str(copied_tr_path))
+        return TransformerNode(tr_type=self._tr_type,
+                               tr_init_kwargs=self._tr_init_kwargs,
+                               tr_path=self._tr_path,
+                               dependency_timestamps=dependency_timestamps,
+                               timestamp=timestamp)
 
 
 class Evaluator:
@@ -116,7 +123,7 @@ class Evaluator:
         HIGH = "high"
         LOW = "low"
 
-    def evaluate(self, input_results: Dict[str, Any]) -> float:
+    def evaluate(self, result: DataPacket) -> float:
         raise NotImplementedError
 
     def good_value(self) -> GoodValue:
@@ -126,10 +133,8 @@ class Evaluator:
 class SelectorNode(Node):
     def __init__(self, *,
                  evaluator,
-                 dependency_timestamps: Dict[str, Timestamp]=None,
                  timestamp: Timestamp=None):
-        super().__init__(dependency_timestamps=dependency_timestamps,
-                         timestamp=timestamp)
+        super().__init__(timestamp=timestamp)
         self._evaluator = evaluator
 
     def get_version_differences(self, other_node: 'SelectorNode'):
@@ -139,16 +144,31 @@ class SelectorNode(Node):
                 self._evaluator.__class__, other_node._evaluator.__class__))
         return diffs
 
-    def evaluate(self, input_results: Dict[str, Any]) -> float:
-        return self._evaluator.evaluate(input_results)
+    def select(self, inputs_results: Dict[str, DataPacket]) -> Tuple[str, Dict[str, float]]:
+        """
+        Args:
+            inputs_results: mapping input node's name to its output
+
+        Returns:
+            pair containing name of the best input, and dictionary with evaluation of all inputs
+        """
+        evals = {name: self._evaluator.evaluate(inputs_results[name]) for name in inputs_results}
+        best_value = float("-inf") if self._is_high_value_good() else float("inf")
+        best_name = None
+        for name, val in evals.items():
+            if (self._is_high_value_good() and val > best_value) or\
+                    (self._is_low_value_good() and val < best_value):
+                best_value = val
+                best_name = name
+        return best_name, evals
 
     def good_value(self) -> Evaluator.GoodValue:
         return self._evaluator.good_value()
 
-    def is_high_value_good(self) -> bool:
+    def _is_high_value_good(self) -> bool:
         return self._evaluator.good_value() == Evaluator.GoodValue.HIGH
 
-    def is_low_value_good(self) -> bool:
+    def _is_low_value_good(self) -> bool:
         return self._evaluator.good_value() == Evaluator.GoodValue.LOW
 
 

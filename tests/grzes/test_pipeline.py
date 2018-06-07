@@ -23,6 +23,18 @@ class CenteringTransformer(BaseTransformer):
             raise RuntimeError("Running transform before fit")
         return {'centered': numbers - self.mean, 'id': self.id}
 
+    def save(self, filepath):
+        joblib.dump({
+            'mean': self.mean,
+            'id': self.id
+        }, filepath)
+
+    def load(self, filepath):
+        d = joblib.load(filepath)
+        self.mean = d['mean']
+        self.id = d['id']
+        return self
+
 
 class ConstantTransformer(BaseTransformer):
     def __init__(self, c):
@@ -52,6 +64,7 @@ class ConstantTransformer(BaseTransformer):
         self.c = state['c']
         self.id = state['id']
         self.fitted = state['fitted']
+        return self
 
 
 class DummyEvaluator(Evaluator):
@@ -86,32 +99,37 @@ def simple_data():
 def test_simple_pipeline():
     p = simple_pipeline()
     data = simple_data()
-    results = p.run(data)
+    p.run(data)
+    output = p.get_data('transformed')
     expected = np.array([0, 5, 3]) - np.mean(data['train']['numbers'])
-    assert np.array_equal(results['transformed']['centered'], expected)
+    assert np.array_equal(output['centered'], expected)
 
 
 def test_transformer_not_refitted_for_same_data():
     p = simple_pipeline()
     data = simple_data()
-    results = p.run(data)
-    original_id = results['transformed']['id']
+    p.run(data)
+    output = p.get_data('transformed')
+    original_id = output['id']
 
     p = simple_pipeline()
-    results = p.run(data)
-    assert results['transformed']['id'] == original_id
+    p.run(data)
+    output = p.get_data('transformed')
+    assert output['id'] == original_id
 
 
 def test_transformer_refitted_for_different_data():
     p = simple_pipeline()
     data = simple_data()
-    results = p.run(data)
-    original_id = results['transformed']['id']
+    p.run(data)
+    output = p.get_data('transformed')
+    original_id = output['id']
 
     p = simple_pipeline()
     data['train'] = {'numbers': np.array([2, -1, 1])}
-    results = p.run(data)
-    assert results['transformed']['id'] != original_id
+    p.run(data)
+    output = p.get_data('transformed')
+    assert output['id'] != original_id
 
 
 def selector_pipeline():
@@ -137,5 +155,6 @@ def selector_pipeline():
 
 def test_selector():
     p = selector_pipeline()
-    result = p.run(simple_data())
-    assert result['final_result']['value'] == 4
+    p.run(simple_data())
+    output = p.get_data('final_result')
+    assert output['value'] == 4
